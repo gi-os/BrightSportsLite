@@ -77,7 +77,7 @@ class FeedTest {
                 game("a", GameState.PRE, "2026-07-29T23:05:00Z"),
                 game("b", GameState.LIVE, "2026-07-29T13:00:00Z"),
             ),
-            emptyList(), now, newYork,
+            now, newYork,
         )
         assertEquals(Feed.Bucket.LIVE, sections.first().bucket)
         assertEquals(listOf(Feed.Bucket.LIVE, Feed.Bucket.TODAY), sections.map { it.bucket })
@@ -127,7 +127,7 @@ class FeedTest {
                 game("older", GameState.FINAL, "2026-07-27T23:05:00Z"),
                 game("newer", GameState.FINAL, "2026-07-28T23:05:00Z"),
             ),
-            emptyList(), now, newYork,
+            now, newYork,
         )
         // One section per day now, newest day first, newest game first inside a day.
         assertTrue(sections.all { it.bucket == Feed.Bucket.RECENT })
@@ -172,7 +172,7 @@ class FeedTest {
         assertNull(
             Feed.build(
                 listOf(game("a", GameState.PRE, "")),
-                emptyList(), now, newYork,
+                now, newYork,
             ).firstOrNull(),
         )
     }
@@ -201,7 +201,7 @@ class FeedDayTitlesTest {
                 game("last", com.gios.brightsportslite.model.GameState.FINAL, "2026-09-06T17:00:00Z"),
                 game("yday", com.gios.brightsportslite.model.GameState.FINAL, "2026-09-08T23:00:00Z"),
             ),
-            emptyList(), now, newYork,
+            now, newYork,
         )
         assertEquals(
             listOf("TOMORROW", "SATURDAY", "SUNDAY", "YESTERDAY", "LAST SUNDAY"),

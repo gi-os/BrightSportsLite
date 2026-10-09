@@ -71,7 +71,7 @@ class SpecialEventsTest {
             "East 1st Round", "NBA Play-In - West - 8th Seed Game",
             "NBA Cup - Group Play", "WNBA Semifinals",
         )) {
-            assertEquals("'$note' should not be special", EventClass.NONE, c(note, "post-season"))
+            assertEquals(EventClass.NONE, c(note, "post-season"), "'$note' should not be special")
         }
         assertEquals(EventClass.NONE, c(null, "eastern-conference-playoffs---round-one"))
     }
@@ -99,7 +99,7 @@ class SpecialEventsTest {
             "NFL Madrid Game", "NBA Mexico City Game 2025", "NBA London Game 2026",
             "MLB World Tour: Mexico City Series",
         )) {
-            assertEquals("'$note' should be a showcase", EventClass.SHOWCASE, c(note))
+            assertEquals(EventClass.SHOWCASE, c(note), "'$note' should be a showcase")
         }
     }
 
@@ -129,7 +129,7 @@ class SpecialEventsTest {
             "Series tied 1-1", "PHI win series 2-0", "NYC leads series 1-0",
             "Washington Spirit advance 3-1 on penalties",
         )) {
-            assertEquals("'$note' should not be special", EventClass.NONE, c(note))
+            assertEquals(EventClass.NONE, c(note), "'$note' should not be special")
         }
     }
 
