@@ -156,7 +156,7 @@ class CardTextTest {
 
     @Test
     fun `ago counts in minutes then hours`() {
-        val now = 10_000_000L
+        val now = 1_800_000_000_000L
         assertEquals("just now", CardText.ago(now - 10_000, now))
         assertEquals("5 min ago", CardText.ago(now - 5 * 60_000, now))
         assertEquals("3 hr ago", CardText.ago(now - 3 * 3_600_000, now))

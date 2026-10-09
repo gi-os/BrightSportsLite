@@ -56,7 +56,7 @@ class JSONObject private constructor(private var fields: Map<String, JsonElement
 
     fun optBoolean(key: String, fallback: Boolean): Boolean = asBoolean(fields[key]) ?: fallback
 
-    fun getString(key: String): String = optString(key, missing(key))
+    fun getString(key: String): String = asString(fields[key]) ?: missing(key)
 
     fun getJSONArray(key: String): JSONArray = optJSONArray(key) ?: missing(key)
 
