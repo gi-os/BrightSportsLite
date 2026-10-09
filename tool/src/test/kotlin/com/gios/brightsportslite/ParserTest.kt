@@ -1,0 +1,569 @@
+package com.gios.brightsportslite
+
+import com.gios.brightsportslite.data.EspnParser
+import com.gios.brightsportslite.data.HockeyTechParser
+import com.gios.brightsportslite.data.Leagues
+import com.gios.brightsportslite.data.StatsApiParser
+import com.gios.brightsportslite.model.EventClass
+import com.gios.brightsportslite.model.Game
+import com.gios.brightsportslite.model.Side
+import com.gios.brightsportslite.model.GameState
+import com.gios.brightsportslite.json.JSONObject
+import kotlin.test.assertEquals
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import kotlin.test.Test
+
+/**
+ * Fixtures are trimmed copies of real responses — the field names and the quirks
+ * (scores as strings, half-innings that omit "runs", parenthesis-wrapped JSON) are
+ * exactly as the providers send them.
+ */
+class ParserTest {
+
+    /** 2026-07-29, so the 2026 F1 calendar splits into raced and unraced either side. */
+    private val NOW_JULY_2026 = 1_785_000_000_000L
+
+    // ------------------------------------------------------------------- ESPN
+
+    private val espnScoreboard = """
+    {"events":[{"id":"401816311","date":"2026-07-29T16:10Z",
+      "name":"Philadelphia Phillies at Miami Marlins","shortName":"PHI @ MIA",
+      "competitions":[{
+        "venue":{"fullName":"loanDepot park"},
+        "status":{"clock":0.0,"displayClock":"0:00","period":6,
+          "type":{"state":"in","completed":false,"detail":"Middle 6th","shortDetail":"Mid 6th"}},
+        "broadcasts":[{"market":"home","names":["Marlins.TV"]},
+                      {"market":"national","names":["MLB.TV"]}],
+        "competitors":[
+          {"homeAway":"home","score":"3","hits":5,"errors":0,
+           "team":{"id":"28","displayName":"Miami Marlins","shortDisplayName":"Marlins",
+                   "abbreviation":"MIA"},
+           "linescores":[{"value":0.0,"displayValue":"0","period":1},
+                         {"value":3.0,"displayValue":"3","period":5}],
+           "records":[{"type":"total","summary":"54-54"},{"type":"home","summary":"33-23"}]},
+          {"homeAway":"away","score":"1",
+           "team":{"id":"22","displayName":"Philadelphia Phillies","shortDisplayName":"Phillies",
+                   "abbreviation":"PHI"},
+           "linescores":[{"value":1.0,"displayValue":"1","period":1}],
+           "records":[{"type":"total","summary":"60-48"}]}]}]}]}
+    """.trimIndent()
+
+    @Test
+    fun `espn scoreboard parses a live game`() {
+        val game = EspnParser.parseScoreboard(Leagues.MLB, espnScoreboard).single()
+        assertEquals(GameState.LIVE, game.state)
+        assertEquals("Mid 6th", game.statusDetail)
+        assertEquals(6, game.period)
+        assertEquals("Marlins", game.home.short)
+        assertEquals(3, game.home.score)
+        assertEquals(1, game.away.score)
+        assertEquals("54-54", game.home.record)
+        assertEquals("loanDepot park", game.venue)
+        assertEquals(listOf("0", "3"), game.home.lineScore)
+        assertEquals(5, game.home.hits)
+    }
+
+    @Test
+    fun `the national broadcast wins over the regional feeds`() {
+        // Either regional feed is the wrong answer for one of the two fan bases.
+        val game = EspnParser.parseScoreboard(Leagues.MLB, espnScoreboard).single()
+        assertEquals("MLB.TV", game.broadcast)
+    }
+
+    @Test
+    fun `a followed team is matched by league and id together`() {
+        val game = EspnParser.parseScoreboard(Leagues.MLB, espnScoreboard).single()
+        assertTrue(game.involves(setOf("mlb:28")))
+        // Team id 28 also exists in the NBA; it must not match there.
+        assertTrue(!game.involves(setOf("nba:28")))
+    }
+
+    @Test
+    fun `espn team lists drop inactive clubs`() {
+        val body = """
+        {"sports":[{"leagues":[{"teams":[
+          {"team":{"id":"1","displayName":"Atlanta Dream","shortDisplayName":"Dream",
+                   "abbreviation":"ATL","isActive":true}},
+          {"team":{"id":"99","displayName":"Defunct Franchise","shortDisplayName":"Defunct",
+                   "abbreviation":"DEF","isActive":false}}]}]}]}
+        """.trimIndent()
+        val teams = EspnParser.parseTeams("wnba", body)
+        assertEquals(listOf("Atlanta Dream"), teams.map { it.displayName })
+        assertEquals("wnba:1", teams.single().key)
+    }
+
+    @Test
+    fun `a rain delay is off, not a quiet live game`() {
+        // Confirmed live against ESPN: a rain delay reports state "in", completed
+        // false, name STATUS_RAIN_DELAY -- identical to an ordinary live game unless
+        // the name is checked first. Missing this means the delay never changes state
+        // at all: no alert when it starts, nothing to say when it clears either.
+        val body = """
+        {"events":[{"id":"1","date":"2026-07-29T16:10Z","competitions":[{
+          "status":{"period":1,"type":{"state":"in","completed":false,
+                    "name":"STATUS_RAIN_DELAY","detail":"Rain Delay, Top 1st",
+                    "shortDetail":"Rain Delay"}},
+          "competitors":[
+            {"homeAway":"home","team":{"id":"1","displayName":"A","shortDisplayName":"A",
+             "abbreviation":"A"}},
+            {"homeAway":"away","team":{"id":"2","displayName":"B","shortDisplayName":"B",
+             "abbreviation":"B"}}]}]}]}
+        """.trimIndent()
+        assertEquals(
+            GameState.OFF,
+            EspnParser.parseScoreboard(Leagues.MLB, body).single().state,
+        )
+    }
+
+    @Test
+    fun `a postponed game is neither upcoming nor final`() {
+        val body = """
+        {"events":[{"id":"1","date":"2026-07-29T16:10Z","competitions":[{
+          "status":{"period":0,"type":{"state":"pre","name":"STATUS_POSTPONED",
+                    "shortDetail":"Postponed"}},
+          "competitors":[
+            {"homeAway":"home","team":{"id":"1","displayName":"A","shortDisplayName":"A",
+             "abbreviation":"A"}},
+            {"homeAway":"away","team":{"id":"2","displayName":"B","shortDisplayName":"B",
+             "abbreviation":"B"}}]}]}]}
+        """.trimIndent()
+        assertEquals(
+            GameState.OFF,
+            EspnParser.parseScoreboard(Leagues.MLB, body).single().state,
+        )
+    }
+
+    @Test
+    fun `a category star matches an event with neither team followed`() {
+        // The MLS All-Star fixture, exactly as it comes down: no headline, competitors
+        // that are absent from the 30-club roster.
+        val body = """
+        {"events":[{"id":"1","date":"2026-07-30T00:00Z","name":"Liga MX All-Stars at MLS All-Stars",
+          "season":{"year":2026,"type":13846,"slug":"regular-season"},
+          "competitions":[{"notes":[],
+            "status":{"period":0,"type":{"state":"pre","shortDetail":"7:00 PM"}},
+            "competitors":[
+              {"homeAway":"home","team":{"id":"9817","displayName":"MLS All-Stars",
+               "shortDisplayName":"MLS","abbreviation":"MLS"}},
+              {"homeAway":"away","team":{"id":"20279","displayName":"Liga MX All-Stars",
+               "shortDisplayName":"Liga MX","abbreviation":"LIGA MX"}}]}]}]}
+        """.trimIndent()
+        val roster = setOf("17606", "190")
+        val game = EspnParser.parseScoreboard(Leagues.MLS, body, roster).single()
+        assertEquals(EventClass.SHOWCASE, game.eventClass)
+        // An all-star game lives in `regular-season`, so there is no title to derive —
+        // and "Regular Season" would be a worse label than the league's own name.
+        assertNull(game.eventTitle)
+        assertTrue(game.involves(setOf("mls:special")))
+        assertTrue(!game.involves(setOf("mls:championship")))
+        assertTrue(!game.involves(setOf("mls:17606")))
+    }
+
+    @Test
+    fun `without a roster the same fixture falls back to the headline`() {
+        // A cold cache means no roster to compare against. The classifier must not
+        // invent an event, and must not crash.
+        val body = """
+        {"events":[{"id":"1","date":"2026-07-30T00:00Z",
+          "season":{"slug":"regular-season"},
+          "competitions":[{"notes":[],
+            "status":{"period":0,"type":{"state":"pre"}},
+            "competitors":[
+              {"homeAway":"home","team":{"id":"9817","displayName":"MLS All-Stars",
+               "shortDisplayName":"MLS","abbreviation":"MLS"}},
+              {"homeAway":"away","team":{"id":"20279","displayName":"Liga MX All-Stars",
+               "shortDisplayName":"Liga MX","abbreviation":"LIGA"}}]}]}]}
+        """.trimIndent()
+        val game = EspnParser.parseScoreboard(Leagues.MLS, body).single()
+        assertEquals(EventClass.NONE, game.eventClass)
+    }
+
+    @Test
+    fun `mls cup is titled from the season slug`() {
+        val body = """
+        {"events":[{"id":"1","date":"2025-12-06T20:30Z",
+          "season":{"year":2025,"type":13119,"slug":"mls-cup"},
+          "competitions":[{"notes":[],
+            "status":{"period":0,"type":{"state":"post","completed":true,"shortDetail":"FT"}},
+            "competitors":[
+              {"homeAway":"home","score":"3","team":{"id":"20232","displayName":"Inter Miami",
+               "shortDisplayName":"Miami","abbreviation":"MIA"}},
+              {"homeAway":"away","score":"1","team":{"id":"9727","displayName":"Vancouver",
+               "shortDisplayName":"Vancouver","abbreviation":"VAN"}}]}]}]}
+        """.trimIndent()
+        val game = EspnParser.parseScoreboard(Leagues.MLS, body, setOf("20232", "9727")).single()
+        assertEquals(EventClass.CHAMPIONSHIP, game.eventClass)
+        assertEquals("MLS Cup", game.eventTitle)
+        assertTrue(game.involves(setOf("mls:championship")))
+    }
+
+    @Test
+    fun `the super bowl keeps its own name and is followable either way`() {
+        val body = """
+        {"events":[{"id":"1","date":"2026-02-08T23:30Z",
+          "season":{"year":2025,"type":3,"slug":"post-season"},
+          "competitions":[{"notes":[{"headline":"Super Bowl LX"}],
+            "status":{"period":4,"type":{"state":"post","completed":true,"shortDetail":"Final"}},
+            "competitors":[
+              {"homeAway":"home","score":"24","team":{"id":"26","displayName":"Seattle Seahawks",
+               "shortDisplayName":"Seahawks","abbreviation":"SEA"}},
+              {"homeAway":"away","score":"21","team":{"id":"17","displayName":"New England Patriots",
+               "shortDisplayName":"Patriots","abbreviation":"NE"}}]}]}]}
+        """.trimIndent()
+        val game = EspnParser.parseScoreboard(Leagues.NFL, body, setOf("26", "17")).single()
+        assertEquals(EventClass.CHAMPIONSHIP, game.eventClass)
+        assertEquals("Super Bowl LX", game.eventTitle)
+        assertTrue(game.involves(setOf("nfl:championship")))
+        // It is two real teams, so following either still works.
+        assertTrue(game.involves(setOf("nfl:26")))
+    }
+
+    @Test
+    fun `a cup tie is filed under its league but named after the competition`() {
+        // Leagues Cup, exactly as it comes down: MLS ids alongside a Liga MX club that
+        // is nowhere in the MLS team list.
+        val body = """
+        {"events":[{"id":"7","date":"2025-08-01T23:30Z",
+          "season":{"year":2025,"slug":"league-phase"},
+          "competitions":[{"notes":[],
+            "status":{"period":2,"type":{"state":"post","completed":true,"shortDetail":"FT"}},
+            "competitors":[
+              {"homeAway":"home","score":"2","team":{"id":"17606",
+               "displayName":"New York City FC","shortDisplayName":"NYCFC","abbreviation":"NYC"}},
+              {"homeAway":"away","score":"1","team":{"id":"228",
+               "displayName":"Leon","shortDisplayName":"Leon","abbreviation":"LEO"}}]}]}]}
+        """.trimIndent()
+        val game = EspnParser.parseScoreboard(
+            Leagues.MLS, body, competition = "Leagues Cup",
+        ).single()
+        assertEquals("mls", game.leagueId)
+        assertEquals("Leagues Cup", game.competition)
+        // A league-phase tie is an ordinary game you get by following the club — the
+        // roster check is deliberately not applied to cups, or the Liga MX side would
+        // make every tie look like an all-star fixture.
+        assertEquals(EventClass.NONE, game.eventClass)
+        assertTrue(game.involves(setOf("mls:17606")))
+        assertTrue(!game.involves(setOf("mls:special")))
+    }
+
+    @Test
+    fun `a cup final counts as a championship`() {
+        val body = """
+        {"events":[{"id":"8","date":"2026-08-31T23:30Z",
+          "season":{"year":2026,"slug":"final"},
+          "competitions":[{"notes":[],
+            "status":{"period":0,"type":{"state":"pre","shortDetail":"8:00 PM"}},
+            "competitors":[
+              {"homeAway":"home","team":{"id":"17606","displayName":"New York City FC",
+               "shortDisplayName":"NYCFC","abbreviation":"NYC"}},
+              {"homeAway":"away","team":{"id":"228","displayName":"Leon",
+               "shortDisplayName":"Leon","abbreviation":"LEO"}}]}]}]}
+        """.trimIndent()
+        val game = EspnParser.parseScoreboard(
+            Leagues.MLS, body, competition = "Leagues Cup",
+        ).single()
+        assertEquals(EventClass.CHAMPIONSHIP, game.eventClass)
+        assertTrue(game.involves(setOf("mls:championship")))
+    }
+
+    @Test
+    fun `a groups filter narrows the scoreboard and standings urls`() {
+        val plain = EspnParser.scoreboardUrl(Leagues.MLS, "20260101", "20260107")
+        assertTrue(!plain.contains("groups="))
+        val filtered = EspnParser.scoreboardUrl(Leagues.CFB, "20260101", "20260107")
+        assertTrue(filtered.contains("groups=80"))
+        // The standings endpoint takes the singular spelling — no relation to the
+        // scoreboard's plural `groups=`, confirmed against the live API.
+        assertTrue(!EspnParser.standingsUrl(Leagues.MLS).contains("group="))
+        assertTrue(EspnParser.standingsUrl(Leagues.CFB).contains("group=80"))
+        assertTrue(!EspnParser.standingsUrl(Leagues.CFB).contains("groups="))
+    }
+
+    @Test
+    fun `the date window can be dropped, keeping the groups filter`() {
+        // ESPN 400s every ranged scoreboard query, so the fetch falls back to the same
+        // request with no window. The fallback is only useful if it is otherwise
+        // identical to the request it replaces — above all for `groups=`.
+        val windowed = EspnParser.scoreboardUrl(Leagues.MLB, "20260911", "20260926")
+        assertTrue(windowed.contains("&dates=20260911-20260926"))
+
+        val bare = EspnParser.scoreboardUrl(Leagues.MLB, "20260911", "20260926", windowed = false)
+        assertTrue(!bare.contains("dates"))
+        assertTrue(bare.endsWith("/scoreboard?limit=500"))
+
+        val grouped = EspnParser.scoreboardUrl(Leagues.CFB, "20260911", "20260926", windowed = false)
+        assertTrue(!grouped.contains("dates"))
+        assertTrue(grouped.endsWith("&groups=80"))
+    }
+
+    @Test
+    fun `every scoreboard url sits under ESPN's college football cliff`() {
+        // Above limit=500 the college football scoreboard answers with its default 25
+        // events however many are asked for — measured 2026-09-16 against the Saturday of
+        // 19 September, which has 71 FBS games on it. Below about 400 a month of MLB gets
+        // its tail cut off instead. Every URL the app builds has to sit in between, and
+        // this test is the only thing standing between that and a silent third of a
+        // Saturday.
+        val urls = listOf(
+            EspnParser.scoreboardUrl(Leagues.CFB, "20260913", "20260919"),
+            EspnParser.scoreboardUrl(Leagues.MLB, "20260913", "20260919", windowed = false),
+            EspnParser.pathScoreboardUrl("soccer/usa.1", "20260913", "20260919"),
+            EspnParser.monthScoreboardUrl("football/college-football", "202609", "80"),
+        )
+        for (url in urls) {
+            val limit = url.substringAfter("limit=").substringBefore('&').toInt()
+            assertTrue(limit in 400..500, "$limit is outside 400..500 in $url")
+        }
+    }
+
+    @Test
+    fun `a month window covers the days the feed asks for`() {
+        // The fallback ESPN left standing. A month either side of the window is what
+        // keeps last weekend's results reachable; the bare query does not.
+        assertEquals(listOf("202609"), EspnParser.monthsIn("20260913", "20260919"))
+        assertEquals(listOf("202609", "202610"), EspnParser.monthsIn("20260928", "20261009"))
+        assertEquals(listOf("202612", "202701"), EspnParser.monthsIn("20261228", "20270104"))
+        // Three months is the cap, and a window that runs backwards must still terminate.
+        assertEquals(listOf("202601"), EspnParser.monthsIn("20260115", "20260101"))
+        assertEquals(emptyList<String>(), EspnParser.monthsIn("not-a-date", "20260919"))
+    }
+
+    @Test
+    fun `the month url keeps the groups filter and the limit`() {
+        val url = EspnParser.monthScoreboardUrl("football/college-football", "202609", "80")
+        assertEquals(
+            "https://site.api.espn.com/apis/site/v2/sports/football/college-football" +
+                "/scoreboard?limit=500&dates=202609&groups=80",
+            url,
+        )
+        assertTrue(!EspnParser.monthScoreboardUrl("baseball/mlb", "202609").contains("groups="))
+    }
+
+    @Test
+    fun `merging months keeps the window and drops everything outside it`() {
+        val september = """{"events":[
+          {"id":"1","date":"2026-09-05T17:00Z"},
+          {"id":"2","date":"2026-09-14T00:20Z"},
+          {"id":"3","date":"2026-09-30T23:00Z"}]}"""
+        val october = """{"events":[
+          {"id":"3","date":"2026-09-30T23:00Z"},
+          {"id":"4","date":"2026-10-01T18:00Z"},
+          {"id":"5","date":"2026-10-20T18:00Z"}]}"""
+
+        val merged = EspnParser.mergeScoreboards(listOf(september, october), "20260913", "20261002")
+        val ids = JSONObject(merged!!).getJSONArray("events").let { events ->
+            (0 until events.length()).map { events.getJSONObject(it).getString("id") }
+        }
+        // 1 is a week behind the window and 5 a fortnight past it. 3 appears in both
+        // months and must be carried once.
+        assertEquals(listOf("2", "3", "4"), ids)
+    }
+
+    @Test
+    fun `a month that misses the window entirely merges to nothing`() {
+        // A month is a far wider net than the window, so a league whose month lands
+        // entirely outside it must merge to nothing rather than draw a stale week.
+        // Returning null is what sends the fetch on to the windowless query.
+        val stale = """{"events":[{"id":"9","date":"2026-09-05T16:00Z"}]}"""
+        assertNull(EspnParser.mergeScoreboards(listOf(stale), "20260913", "20260919"))
+        assertNull(EspnParser.mergeScoreboards(emptyList(), "20260913", "20260919"))
+        // A body that is not JSON at all is skipped rather than thrown.
+        assertNull(EspnParser.mergeScoreboards(listOf("<html>502</html>"), "20260913", "20260919"))
+    }
+
+    @Test
+    fun `college football has no off-roster signal to misfire on`() {
+        // An FBS-vs-FCS game is a normal non-conference Saturday, not a showcase — so
+        // unlike the leagues that use the off-roster check, this one must not opt in.
+        assertTrue(!Leagues.CFB.hasEvents)
+        assertEquals("80", Leagues.CFB.espnGroup)
+    }
+
+    @Test
+    fun `team roster comes from the standings tree when a groups filter is set`() {
+        // Shaped like the real FBS standings response: a conference layer, then teams.
+        // The `teams` endpoint ignores `groups=80` entirely, so this tree is the only
+        // reliable source for who's actually in the FBS.
+        val body = """
+        {"name":"FBS","children":[
+          {"name":"American Conference","standings":{"entries":[
+            {"team":{"id":"2678","displayName":"Tulane Green Wave","abbreviation":"TULN",
+             "shortDisplayName":"Tulane","isActive":true},"stats":[]}]}},
+          {"name":"Big Ten Conference","standings":{"entries":[
+            {"team":{"id":"194","displayName":"Michigan Wolverines","abbreviation":"MICH",
+             "shortDisplayName":"Michigan","isActive":true},"stats":[]}]}}]}
+        """.trimIndent()
+        val teams = EspnParser.parseTeamsFromStandings("cfb", body)
+        assertEquals(listOf("Michigan Wolverines", "Tulane Green Wave"), teams.map { it.displayName })
+        assertEquals("cfb:2678", teams.first { it.displayName == "Tulane Green Wave" }.key)
+    }
+
+    @Test
+    fun `mls carries its two cups`() {
+        assertEquals(
+            listOf("Leagues Cup", "U.S. Open Cup"),
+            Leagues.MLS.cups.map { it.name },
+        )
+        // Paths are full ESPN sport paths, since the scoreboard URL takes them verbatim.
+        assertTrue(Leagues.MLS.cups.all { it.path.startsWith("soccer/") })
+        assertTrue(Leagues.MLB.cups.isEmpty())
+    }
+
+    // -------------------------------------------------------------- StatsAPI
+
+    private val statsApiSchedule = """
+    {"dates":[{"games":[{
+      "gamePk":814751,"gameDate":"2026-07-28T19:05:00Z",
+      "status":{"abstractGameState":"Live","detailedState":"In Progress"},
+      "venue":{"name":"Cheney Stadium"},
+      "seriesDescription":"Regular Season",
+      "teams":{
+        "away":{"score":4,"leagueRecord":{"wins":56,"losses":44},
+                "team":{"id":105,"name":"Sacramento River Cats","teamName":"River Cats",
+                        "abbreviation":"SAC","parentOrgName":"San Francisco Giants"}},
+        "home":{"score":5,"leagueRecord":{"wins":50,"losses":50},
+                "team":{"id":529,"name":"Tacoma Rainiers","teamName":"Rainiers",
+                        "abbreviation":"TAC","parentOrgName":"Seattle Mariners"}}},
+      "linescore":{"currentInning":9,"currentInningOrdinal":"9th","inningState":"Top",
+        "teams":{"home":{"hits":9,"errors":0},"away":{"hits":7,"errors":1}},
+        "innings":[
+          {"num":1,"home":{"runs":0},"away":{"runs":0}},
+          {"num":9,"away":{"runs":1}}]},
+      "broadcasts":[{"type":"TV","name":"MiLB.TV"}]}]}]}
+    """.trimIndent()
+
+    @Test
+    fun `statsapi schedule parses a minor league game`() {
+        val game = StatsApiParser.parseSchedule(Leagues.AAA, statsApiSchedule).single()
+        assertEquals(GameState.LIVE, game.state)
+        assertEquals("Top 9th", game.statusDetail)
+        assertEquals(5, game.home.score)
+        assertEquals("56-44", game.away.record)
+        assertEquals("MiLB.TV", game.broadcast)
+    }
+
+    @Test
+    fun `a half inning that has not been played shows blank, not zero`() {
+        // The bottom of the ninth in a walk-off has no "runs" key at all.
+        val game = StatsApiParser.parseSchedule(Leagues.AAA, statsApiSchedule).single()
+        assertEquals(listOf("0", "-"), game.home.lineScore)
+        assertEquals(listOf("0", "1"), game.away.lineScore)
+    }
+
+    @Test
+    fun `a postponed minor league game is off, not final`() {
+        // Confirmed live against StatsAPI: a postponed MiLB game reports
+        // abstractGameState "Final" -- reading as a completed game rather than a
+        // rainout unless detailedState is checked first, and refiring a FINAL alert
+        // every time a pending reschedule flips the feed between Preview and Final.
+        val body = """
+        {"dates":[{"games":[{
+          "gamePk":1,"gameDate":"2026-08-04T23:04:00Z",
+          "status":{"abstractGameState":"Final","detailedState":"Postponed"},
+          "teams":{
+            "home":{"team":{"id":1,"name":"A"}},
+            "away":{"team":{"id":2,"name":"B"}}}}]}]}
+        """.trimIndent()
+        assertEquals(
+            GameState.OFF,
+            StatsApiParser.parseSchedule(Leagues.AAA, body).single().state,
+        )
+    }
+
+    @Test
+    fun `a suspended minor league game is off, not an ordinary live one`() {
+        // Confirmed live: a suspended MiLB game reports abstractGameState "Live" --
+        // indistinguishable from a normal in-progress game unless detailedState is
+        // checked first, which means the suspension carries no alert either way: none
+        // when it stops, and nothing to say when it resumes.
+        val body = """
+        {"dates":[{"games":[{
+          "gamePk":2,"gameDate":"2026-08-02T17:05:00Z",
+          "status":{"abstractGameState":"Live","detailedState":"Suspended"},
+          "teams":{
+            "home":{"score":3,"team":{"id":1,"name":"A"}},
+            "away":{"score":2,"team":{"id":2,"name":"B"}}}}]}]}
+        """.trimIndent()
+        assertEquals(
+            GameState.OFF,
+            StatsApiParser.parseSchedule(Leagues.AAA, body).single().state,
+        )
+    }
+
+    @Test
+    fun `a postponed game with a make-up date is not counted twice`() {
+        // The actual repeat this covers, live: a postponed MiLB game keeps its gamePk
+        // and gets listed under both its original date (detailedState "Postponed")
+        // and its reschedule date (a generic placeholder, "Scheduled") in the same
+        // schedule response -- confirmed for the Brooklyn Cyclones, gamePk 821809.
+        // Two Game objects sharing one id meant the second one processed always
+        // overwrote whichever snapshot the first one had just recorded, so the
+        // postponement's "already told you" marker never actually stuck -- the next
+        // poll found the same stale unseen snapshot and refired every two minutes.
+        val body = """
+        {"dates":[
+          {"date":"2026-08-07","games":[{
+            "gamePk":821809,"gameDate":"2026-08-07T22:35:00Z",
+            "status":{"abstractGameState":"Final","detailedState":"Postponed"},
+            "teams":{"home":{"team":{"id":426,"name":"Wilmington Blue Rocks"}},
+                     "away":{"team":{"id":453,"name":"Brooklyn Cyclones"}}}}]},
+          {"date":"2026-08-08","games":[{
+            "gamePk":821809,"gameDate":"2026-08-08T20:35:00Z",
+            "status":{"abstractGameState":"Preview","detailedState":"Scheduled"},
+            "teams":{"home":{"team":{"id":426,"name":"Wilmington Blue Rocks"}},
+                     "away":{"team":{"id":453,"name":"Brooklyn Cyclones"}}}}]}]}
+        """.trimIndent()
+        val games = StatsApiParser.parseSchedule(Leagues.HIGH_A, body)
+        assertEquals(1, games.size)
+        assertEquals(GameState.OFF, games.single().state)
+    }
+
+    @Test
+    fun `minor league teams carry their parent club`() {
+        val body = """
+        {"teams":[{"id":105,"name":"Sacramento River Cats","teamName":"River Cats",
+                   "abbreviation":"SAC","parentOrgName":"San Francisco Giants"}]}
+        """.trimIndent()
+        val team = StatsApiParser.parseTeams("milb-aaa", body).single()
+        assertEquals("Sacramento River Cats (SFG)", team.displayName)
+    }
+
+    // ------------------------------------------------------------ HockeyTech
+
+    private val pwhlScorebar = """
+    {"SiteKit":{"Scorebar":[{
+      "ID":"343","GameDateISO8601":"2026-05-08T19:00:00-04:00",
+      "HomeID":"5","HomeCode":"OTT","HomeNickname":"Charge","HomeLongName":"Ottawa Charge",
+      "HomeGoals":"2","HomeWins":"4","HomeRegulationLosses":"4","HomeOTLosses":"0",
+      "HomeShootoutLosses":"1",
+      "VisitorID":"1","VisitorCode":"BOS","VisitorNickname":"Fleet",
+      "VisitorLongName":"Boston Fleet","VisitorGoals":"1","VisitorWins":"1",
+      "VisitorRegulationLosses":"3","VisitorOTLosses":"0","VisitorShootoutLosses":"0",
+      "Period":"3","PeriodNameLong":"3rd","PeriodNameShort":"3","GameClock":"00:00",
+      "GameStatus":"4","Intermission":"0","GameStatusStringLong":"Final",
+      "venue_name":"Canadian Tire Centre | Ottawa"}]}}
+    """.trimIndent()
+
+    @Test
+    fun `pwhl scorebar parses a finished game`() {
+        val game = HockeyTechParser.parseScorebar(Leagues.PWHL, pwhlScorebar).single()
+        assertEquals(GameState.FINAL, game.state)
+        assertEquals("Final", game.statusDetail)
+        assertEquals(2, game.home.score)
+        assertEquals("Charge", game.home.short)
+        // Shootout losses fold into the OT column, the way a hockey record is written.
+        assertEquals("4-4-1", game.home.record)
+        assertNull(game.clock)
+    }
+
+    @Test
+    fun `pwhl game status is read from the code, not the string`() {
+        val live = pwhlScorebar.replace("\"GameStatus\":\"4\"", "\"GameStatus\":\"2\"")
+        assertEquals(
+            GameState.LIVE,
+            HockeyTechParser.parseScorebar(Leagues.PWHL, live).single().state,
+        )
+    }
+
+}

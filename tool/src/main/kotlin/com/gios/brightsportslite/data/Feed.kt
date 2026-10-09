@@ -1,0 +1,219 @@
+package com.gios.brightsportslite.data
+
+import com.gios.brightsportslite.model.Game
+import com.gios.brightsportslite.model.GameState
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+
+/**
+ * Turning a pile of games from several leagues into the one scrollable column the tool
+ * shows. Pure functions on purpose — this is the logic most likely to be wrong at a
+ * date boundary, and it is covered by unit tests.
+ */
+object Feed {
+
+    enum class Bucket { LIVE, TODAY, TOMORROW, UPCOMING, RECENT }
+
+    sealed interface Item {
+        val sortMillis: Long
+
+        data class GameItem(val game: Game) : Item {
+            override val sortMillis: Long get() = game.startMillis
+        }
+    }
+
+    /**
+     * @param dayEpoch the calendar day this section covers (epoch day in the user's zone),
+     * or 0 for LIVE. One section per day rather than one per bucket: a football week is
+     * Thursday, Saturday, Sunday and Monday, and "UPCOMING" over all four says nothing.
+     */
+    data class Section(
+        val bucket: Bucket,
+        val title: String,
+        val items: List<Item>,
+        val dayEpoch: Long = 0L,
+    )
+
+    /**
+     * How far back a finished game stays in the feed. Must not be shorter than the
+     * repository's fetch window, or a result gets downloaded and then silently dropped —
+     * which looks exactly like a team going missing from the feed.
+     */
+    private const val RECENT_DAYS = 7L
+
+    /** How far ahead the schedule runs before it stops being "upcoming". */
+    private const val UPCOMING_DAYS = 14L
+
+    fun build(
+        games: List<Game>,
+        nowMillis: Long,
+        zone: ZoneId,
+        /** How far back and ahead of today a game is kept. */
+        backDays: Long = RECENT_DAYS,
+        aheadDays: Long = UPCOMING_DAYS,
+        /**
+         * Keep one calendar day only, as an epoch day. This is what the feed pages on:
+         * one press of a chevron, one day.
+         *
+         * LIVE is the exception and rides with today, because a running score belongs to
+         * the day it is being played on. Ask for tomorrow and a game in progress is not on
+         * the page, which is the right answer — tomorrow has not happened.
+         */
+        onlyDay: Long? = null,
+    ): List<Section> {
+        val today = localDate(nowMillis, zone)
+        // Keyed by bucket then day, so LIVE is one section and every other bucket is one
+        // per calendar day.
+        val groups = linkedMapOf<Pair<Bucket, Long>, MutableList<Item>>()
+
+        fun add(bucket: Bucket, atMillis: Long, item: Item) {
+            val day = if (bucket == Bucket.LIVE) 0L else localDate(atMillis, zone).toEpochDay()
+            if (onlyDay != null) {
+                val keep = if (bucket == Bucket.LIVE) {
+                    onlyDay == today.toEpochDay()
+                } else {
+                    day == onlyDay
+                }
+                if (!keep) return
+            }
+            groups.getOrPut(bucket to day) { mutableListOf() } += item
+        }
+
+        for (game in games) {
+            val bucket = bucketFor(game.state, game.startMillis, today, zone, backDays, aheadDays) ?: continue
+            add(bucket, game.startMillis, Item.GameItem(game))
+        }
+
+        val out = mutableListOf<Section>()
+        for (bucket in Bucket.entries) {
+            val days = groups.keys.filter { it.first == bucket }.map { it.second }
+            // Upcoming days run forward; results run backward, newest day first.
+            val ordered = if (bucket == Bucket.RECENT) days.sortedDescending() else days.sorted()
+            for (day in ordered) {
+                val items = groups[bucket to day] ?: continue
+                val sorted = if (bucket == Bucket.RECENT) {
+                    items.sortedByDescending { it.sortMillis }
+                } else {
+                    items.sortedBy { it.sortMillis }
+                }
+                out += Section(bucket, title(bucket, day, today), sorted, day)
+            }
+        }
+        return out
+    }
+
+    private val weekday = DateTimeFormatter.ofPattern("EEEE", Locale.US)
+    private val dayDate = DateTimeFormatter.ofPattern("EEE MMM d", Locale.US)
+
+    /**
+     * "LIVE", "TODAY", "TOMORROW", then the weekday for the rest of the week and a date
+     * past that. Results say "YESTERDAY" and "LAST SUNDAY" so a Saturday four days back
+     * and a Saturday three days ahead never share a header.
+     */
+    private fun title(bucket: Bucket, dayEpoch: Long, today: LocalDate): String {
+        val day = LocalDate.ofEpochDay(dayEpoch)
+        val diff = dayEpoch - today.toEpochDay()
+        return when (bucket) {
+            Bucket.LIVE -> "LIVE"
+            Bucket.TODAY -> "TODAY"
+            Bucket.TOMORROW -> "TOMORROW"
+            Bucket.UPCOMING -> if (diff <= 6) day.format(weekday).uppercase()
+            else day.format(dayDate).uppercase()
+            Bucket.RECENT -> when {
+                diff == -1L -> "YESTERDAY"
+                diff >= -6 -> "LAST " + day.format(weekday).uppercase()
+                else -> day.format(dayDate).uppercase()
+            }
+        }
+    }
+
+    /**
+     * A game belongs to the day it is played in the user's own time zone, not UTC —
+     * otherwise every West Coast night game lands on tomorrow.
+     */
+    private fun bucketFor(
+        state: GameState,
+        atMillis: Long,
+        today: LocalDate,
+        zone: ZoneId,
+        backDays: Long = RECENT_DAYS,
+        aheadDays: Long = UPCOMING_DAYS,
+    ): Bucket? {
+        if (atMillis <= 0L) return null
+        if (state == GameState.LIVE) return Bucket.LIVE
+        val date = localDate(atMillis, zone)
+        val days = date.toEpochDay() - today.toEpochDay()
+        return when {
+            days == 0L -> Bucket.TODAY
+            days == 1L -> Bucket.TOMORROW
+            days in 2..aheadDays -> Bucket.UPCOMING
+            days < 0L && -days <= backDays -> Bucket.RECENT
+            else -> null
+        }
+    }
+
+    /**
+     * "WEEK 2" for a page whose games carry a football week, else null.
+     *
+     * The page is named by its date now, so this rides in the line under it, where it is
+     * the one thing a date does not say. The NFL's week wins when college football, a week
+     * ahead in its own count, is on the same page, and a page that is mostly baseball with
+     * one football game in it gets no week at all.
+     */
+    fun weekLabel(games: List<Game>): String? {
+        val weeks = games.filter { it.week != null }
+        if (weeks.isEmpty() || weeks.size * 2 < games.size) return null
+        val nfl = weeks.filter { it.leagueId == "nfl" }
+        val pick = (nfl.ifEmpty { weeks }).groupingBy { it.week!! }.eachCount()
+            .maxByOrNull { it.value }?.key ?: return null
+        return "WEEK $pick"
+    }
+
+    /**
+     * The name of one page of the feed: "TODAY", "YESTERDAY", "TOMORROW", and the weekday
+     * with its date past that — "SAT SEP 19".
+     *
+     * The weekday alone is what the section headers use, and it is not enough here: the
+     * chevrons reach a fortnight forward, so two Saturdays are in range and a bare
+     * SATURDAY would name them both.
+     */
+    /** "SAT SEP 19" for any day, including the three [dayTitle] gives a name to. */
+    fun dayLine(day: LocalDate): String = day.format(dayDate).uppercase()
+
+    fun dayTitle(day: LocalDate, nowMillis: Long, zone: ZoneId): String {
+        val today = localDate(nowMillis, zone)
+        return when (day.toEpochDay() - today.toEpochDay()) {
+            0L -> "TODAY"
+            -1L -> "YESTERDAY"
+            1L -> "TOMORROW"
+            else -> day.format(dayDate).uppercase()
+        }
+    }
+
+    /** "3–1 FOR YOUR TEAMS": followed teams' results in a set of finals, or null when none are final. */
+    fun recordLine(games: List<Game>, follows: Set<String>): String? {
+        var w = 0; var l = 0
+        for (g in games) {
+            if (g.state != GameState.FINAL) continue
+            val h = g.home.score ?: continue
+            val a = g.away.score ?: continue
+            if (h == a) continue
+            val homeMine = "${g.leagueId}:${g.home.teamId}" in follows
+            val awayMine = "${g.leagueId}:${g.away.teamId}" in follows
+            if (homeMine && !awayMine) { if (h > a) w++ else l++ }
+            else if (awayMine && !homeMine) { if (a > h) w++ else l++ }
+        }
+        if (w + l == 0) return null
+        return "$w–$l FOR YOUR TEAMS"
+    }
+
+    /**
+     * `LocalDate.ofInstant` is a Java 9 addition and is missing from the java.time
+     * subset on older Android releases, so the date is derived the Java 8 way.
+     */
+    private fun localDate(millis: Long, zone: ZoneId): LocalDate =
+        Instant.ofEpochMilli(millis).atZone(zone).toLocalDate()
+}

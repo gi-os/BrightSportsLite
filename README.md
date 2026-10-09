@@ -1,72 +1,128 @@
-# light-sdk
-or: a tool for building Tools
+# BrightSports Lite
 
-## tl;dr
-This repository contains the scaffolding for building simple tools for the Light Phone III. Included are a library ([:sdk:client](./sdk/client)) and placeholder application ([:tool](./tool)) that depends on it. To create a tool that is fully compatible with LightOS, you must write your application code within the `tool` module, using the primitives provided by the sdk client library.
+Scores for the teams you follow, on the Light Phone III, built as an official Light SDK tool.
+Launcher label **BrightSports Lite**, tool id `com.gios.brightsportslite`.
 
-You can and should use current Android best practices: Kotlin for all source code, Compose for UI, Coroutines for async programming, and MVVM architecture. **Although this is appears to be a fairly standard Android dev environment, you will quickly find out that we are (gently but broadly) restricting which Android APIs and third-party libraries can be used. This is in an effort to provide a secure and distinctly _light_ experience for our users. These restrictions are _not_ set in stone and should ease up over time. If there is a stable, open-source library that you'd like us to allow, please let us know! More on this later.**
+This is the SDK-compatible cut of [BrightSports](https://github.com/gi-os/BrightSports), a
+sideloaded app. The Light SDK limits which Android APIs and libraries a tool may use, so this
+version keeps the core of the original (follow your teams, read one column of scores, open a
+game) and leaves out the parts the SDK cannot support. Each one is listed below with the reason.
 
-## IMPORTANT!! July 1, 2026 Update
-If you're reading this, welcome! You're early! (in a cool way)
-This repo is a work-in-progress and will remain so for a while. Things are going to change _fast_ in the coming weeks. If you're going to start building right away, be sure to `git pull` frequently.
-Before you do, though, please be aware that **while we feel good about letting everybody start to explore and build, we are still working on the infrastructure to properly deploy your new tools.**
-The currently builds of LightOS in the wild are not yet ready to "play nice" with the tools built here. If you're someone who's already comfortable working with ADB to sideload APKs on your
-Light Phone III, you can totally do that with whatever you do here! But we're shooting to make these tools feel as seamless as the ones already available in LightOS, and that's going to take a bit more work. 
-We're hoping to have an update on that front later this month. In the meantime, the best way to start working is to use an Android emulator running our new [LightOS Emulator](sdk/emulator). The instructions for getting that up and running
-are [right here](docs/system_app).
+## What it does
 
-## Quickstart
+**Scores.** One column, followed teams only. Live games come first, then today, tomorrow and
+the rest of the week, one section per day, then the last three days of results, newest first.
+Each row has the league (or the event, like "SUPER BOWL LX", or the cup, like "LEAGUES CUP"),
+where the game stands ("Q2 3:24", "BOT 7TH", "SUN 1:00 PM", "FINAL/OT"), both teams with the
+score, and one line of context: down and distance in football, the count, outs and runners in
+baseball, the betting line and forecast before a game, ESPN's headline after it. In a finished
+game the loser is drawn in grey. The list ends: three days back and seven days ahead, nothing
+more.
 
-### Running your Tool
-**You can test your tool on any Android device or emulator**, but certain functionality (receiving push notifications, requesting special permissions) can only be tested with:
-A) Real Light Phone hardware running LightOS
-B) An Android emulator (on your computer) set up to run our LightOS emulator app as a _system app_ ([see advanced instructions](docs/system_app))
+**Game.** Tap a row for the game: both teams and the score, the live situation (batter and
+pitcher, last play, the drive), the recap for a finished game with the full story one tap
+further, the line score by inning, quarter, period or half, the scoring summary (ESPN leagues
+except basketball) or the goals and cards for soccer, then start time, venue, TV, the line,
+weather and both records.
 
-You can quickly [create an emulator](https://developer.android.com/studio/run/managing-avds) that generally feels like an LPIII by using the following settings:
-* 1080 X 1240, 3.92" display
-* Android API 34
-* NO Google Play Services installed
+**Teams.** Leagues grouped as in the full app. Open one to tick teams on and off. The ESPN
+majors and NWSL/MLS also offer two whole categories, **Championship games** and **Special
+games** (all-star games, outdoor games, games abroad), for following those whoever plays.
+Team lists are cached for a week, so the picker still works with no signal.
 
-### Start Building
-1. Fork and/or clone this repository into your local dev environment.
-2. Install Android Studio and open this project within it. (IntelliJ IDEA should also work)
+**Refreshing.** The scores screen fetches when it opens if what it has is stale, then every
+minute while a followed game is live or about to start, and every ten minutes otherwise. It
+stops when the screen is not showing. The refresh button at the bottom fetches on demand, but
+not more than once every twenty seconds. A `LightWork` job refreshes the cache every half hour
+in the background so the screen opens on recent numbers. It never notifies.
 
-3. Edit the code in `HomeScreen` and `HomeScreenViewModel` to get started. `Homescreen` surfaces a `@Composable` method named `Content`. This is the UI that is shown when the tool first boots. You'll notice this UI sources data from it's `viewModel` field, which is an instance of `HomeScreenViewModel`. Edit that class with your screen's logic and expose the data to the UI using either Compose `State` or Coroutine `Flow`s. If you want to create a new screen, create a new Screen/ViewModel pair: your screen should extend from `LightScreen` and your VM from `LightScreenViewModel`. Your screen implementation will need:
-   1. A direct reference to your ViewModel's class type
-   2. A factory method for creating a new instance of your ViewModel.
+**The wheel** scrolls every screen. The wheel's keycodes (`WHEEL_CW`/`WHEEL_CCW`, scancodes
+20/19 on the Pixart sensor) are read in `LightViewModel.onKeyDown`.
 
-Look at `HomeScreen` as an example for how this is done. To navigate to your new screen, use the `navigateTo` function built into `LightScreen` - just pass it a lambda to create an instance of your new screen. Note that the `LightScreen` constructor takes in a `SealedLightActivity`. The lambda is provided an instance of this as a default parameter.
+### Leagues and data sources
 
-Since LightOS does not use Android system navigation, we provide a back button for you. As long as you use `navigateTo` to move between screens, our back button should work great. If need be, you can override the `onBackPressed` method in your `LightViewModel`.
+| | |
+| --- | --- |
+| Majors | MLB, NFL, NBA, NHL, MLS (with Leagues Cup and U.S. Open Cup games) |
+| Soccer | EPL, LaLiga, Bundesliga, Serie A, Ligue 1, Champions League, Europa League |
+| College football | FBS and FCS |
+| Women's | WNBA, NWSL, PWHL, WPBL |
+| Minor league baseball | Triple-A, Double-A, High-A, Single-A |
 
-### Submitting Your Tool
-Given our relatively limited resources and desire to keep our users safe, we're requiring that all community tools be open source (including our own!). 
-Tools are built and signed directly from a publicly available git commit, and we'll be archiving the source at build time.
-You're free to build and share privately, but LightOS won't let you install tools that are not signed by us without acknowledging privacy and performance risks.
-We won't block users from performing these "dangerous" sideloads, but we're not going to encourage it either. 
-Using the Dashboard, developers are able to queue up a build of your tool on our servers, and if it follows our guidelines and compiles cleanly, we will hand you back a signed, shareable APK.
+The same four keyless public JSON sources the full app uses, with no account or key:
 
-1. Review the [Tool Guidelines](TOOL_GUIDELINES.md) to get a sense of the kind of tools we're hoping to showcase.
-2. Ensure your tool is built with the latest Light SDK version and is accessible via a public Github repo.
-3. Enable developer mode on the [dashboard](https://dashboard.thelightphone.com/): Settings -> Account -> Developer Account.
-4. From there, you can create your tool: Settings -> Account -> Developer Account -> Manage Custom Tools -> Submit New Tool:
-  - The package name is unique for all tools and can't be changed later. It is pulled from the default branch of the Github repo submitted upon registering the tool.
-  - You'll then have the opportunity to add images. You can add them later on as well, but we'll require at least one for a tool to be approved.
-5. Now go in the tool detail page and press "submit build":
-  - Enter the git ref of the version of the tool to be built and a small description of the changelog.
-  - If your tool already has an active build, you won't be able to submit another.
-  - The `versionCode` of the submitted build should be higher than the one of the last version listed in the Tool page.
-6. Wait for the build to finish:
-  - In case of an error, use the "view details" button on the "Builds" section of the Tool page to check the error message. The "retry build" can be used to re-attempt building from the same git ref if necessary.
-  - If you believe the build error is due to an issue on our end (e.g. with light-sdk or our infrastructure), please feel free to open an Issue on this repo!
-  - In case of success, the "download apk" button should appear. A new "Version" entry will be created with "pending approval" status.
-7. Our team will review the builds and reach out to you via e-mail if we have any feedback regarding the approval process.
-8. If you have any questions, please e-mail us at tools@thelightphone.com
+- ESPN's site API (`site.api.espn.com/apis/site/v2/sports/.../scoreboard`, `teams`, `summary`,
+  and `apis/v2/.../standings` for the college football rosters).
+- MLB StatsAPI (`statsapi.mlb.com/api/v1/schedule` and `teams`) for the minor leagues.
+- HockeyTech/LeagueStat (`lscluster.hockeytech.com`, the public key thepwhl.com uses) for the PWHL.
+- The WPBL's own stats service (`stats.womensprobaseballleague.com/v1/games` and `teams`).
 
-### Sharing Your Tool
-Once we release a version of LightOS that supports community tools, users will have an option to choose what kind of tools they want to be able to run on their device:
-- **Light-approved tools**: These include tools that are either built internally by the Light team, or built by the community and officially tested/signed-off by the Light team. We don't know _exactly_ what that sign-off process is going to look like, but as a heads-up: we're going to be looking pretty hard at whether a submitted tool matches the Light ethos both functionally and aesthetically. We've included a UX/UI library to make this as easy as possible! From a technical standpoint, these approved tools are both signed by us _and_ added to an "allow-list" within LightOS. Phones with this option selected will only install and display tools that meet both criteria.
-- **SDK-built tools**: This is a slightly more permissive choice. Phones with this option selected will install and launch any tool that was built and signed by Light. These don't require any manual approval by us (although we can block them in extreme cases). If a user wants to be able to install a tool that was shared locally or somewhere outside of Light's dashboard, but they still want to be confident that it will run well and integrate nicely with LightOS, they might choose this option.
-- **Any tools**: A user will have the option to make any APK launchable from LightOS, but they will own the responsibility of getting them installed/uninstalled. When a user selects this option, we will warn them that they are potentially opening their device up to security risks, and that doing so will limit our ability to support them if something goes wrong.
+The four parsers, the special-game classifier, the timestamp parser and the feed grouping are
+ported from BrightSports nearly line for line, along with their tests, including the
+workarounds for ESPN's broken date-range queries and its college football limit cliff. The full
+app reads JSON through Android's built-in `org.json`; here a small stand-in with the same
+`opt*` behavior (`json/OrgJson.kt`) sits on kotlinx.serialization, so the parsers run unchanged
+in plain JVM unit tests.
 
-## [Complete Documentation](./docs)
+## What was dropped, and why
+
+| Feature in BrightSports | Why it is not here |
+| --- | --- |
+| Score alerts, the live ticker, the alert box over other apps, buzz patterns, spoiler delay | The SDK gives tools no notification API (`NotificationManager` comes from `getSystemService`, which is blocked). The overlay needs `SYSTEM_ALERT_WINDOW`, the exact-alarm poll needs `AlarmManager` from `android.app`, and the ticker is a foreground service. None of these are allowed. |
+| Live push over the BasilNet relay | Only useful for alerts, which are gone, and it depends on a private server. |
+| BrightControl integration (lock-face card, alert ownership) | Talks to another app through broadcasts and intents, which are blocked. |
+| Home screen widgets | Tools cannot publish widgets. |
+| Shake to report a glitch | Needs `SensorManager` from `getSystemService`. |
+| Team crests and the condensed score font | Left out to keep the tool small and in Light's own type. |
+| Formula 1, PGA golf, Grand Slam tennis | Field events and players rather than two teams. Left to the full app to keep this one to one shape of game. |
+| Standings, team season pages, search across every league | Out of scope for a lite cut. Search across non-followed games would also cut against Light's guidance against feeds you did not ask for. |
+| Play-by-play, the drawn football field and diamond, celebrations | The play-by-play wanted a 15-second refresh; this tool will not refresh faster than once a minute. The rest is decoration. |
+| Silencing a followed team | Only meaningful for alerts. |
+
+## Build
+
+You need JDK 17 and the Android SDK (platform 36).
+
+```sh
+./gradlew -DlightSdk.toolOnly=true :tool:assembleDebug
+./gradlew -DlightSdk.toolOnly=true :tool:testDebugUnitTest :tool:lintDebug
+```
+
+Parsing, formatting and refresh timing live in `tool/src/main/kotlin/com/gios/brightsportslite/`
+under `data/`, `json/` and `text/`, with no Android imports, and are tested in `tool/src/test/`.
+CI (`.github/workflows/build-tool.yml`) runs the tests, lint and the debug build on every push
+with the same flags as Light's tool builder. It publishes nothing.
+
+To install on a phone or emulator running the Light SDK server, see `./gradlew :tool:uploadTool`
+in `tool/build.gradle.kts`.
+
+## Permissions
+
+- `INTERNET`, to fetch scores and team lists.
+- `ACCESS_NETWORK_STATE`, which the network stack uses to tell no signal from a failed request.
+
+## Privacy
+
+No account, no analytics, no tracking. The tool sends ordinary GET requests to the four score
+providers above, one per followed league, and nothing else. Your list of teams never leaves
+the phone: it asks for a league's whole scoreboard and filters it on the device.
+
+## Tool Library submission notes
+
+- The tool id, label and version are in `tool/lighttool.toml`. Bump `versionCode` for every
+  submission.
+- Everything is in the `tool` module. `sdk/`, `plugin/` and `lint-rules/` are upstream and
+  unmodified, so this repository can be rebased onto
+  [lightphone/light-sdk](https://github.com/lightphone/light-sdk).
+- Dependencies are only what `:sdk:client` already provides: OkHttp (through ktor's OkHttp
+  engine), kotlinx.serialization, DataStore, WorkManager through `LightWork`, and Compose.
+- No reflection, no blocked imports, no custom manifest.
+- Intentionality: no feed of games for teams you don't follow, a list that ends, and no
+  automatic refresh faster than once a minute.
+
+## Credits
+
+Built on [lightphone/light-sdk](https://github.com/lightphone/light-sdk) (MIT); see `LICENSE`.
+The parsers and feed logic are ported from [gi-os/BrightSports](https://github.com/gi-os/BrightSports).
+Scores come from ESPN, MLB StatsAPI, HockeyTech and the WPBL; none of them is affiliated with
+this tool.
