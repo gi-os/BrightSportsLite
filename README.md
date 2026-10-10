@@ -1,5 +1,7 @@
 # BrightSports Lite
 
+> **This is the Lite version.** BrightSports Lite is built only with Light's official SDK, so it can go in the Light Tool Library. It does less than the full app. For the full app, get [BrightSports](https://github.com/gi-os/BrightSports) ([on BrightMarket](https://brightmarket.gzl.dev/app/com.gios.lightsports/)).
+
 Scores for the teams you follow, on the Light Phone III, built as an official Light SDK tool.
 Launcher label **BrightSports Lite**, tool id `com.gios.brightsportslite`.
 
