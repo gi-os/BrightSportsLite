@@ -1,3 +1,5 @@
+<a href="https://github.com/sponsors/gi-os"><img src="https://raw.githubusercontent.com/gi-os/gi-os/main/images/bright-sponsors.svg" width="100%" alt="Thank you to my sponsors"></a>
+
 # BrightSports Lite
 
 > **This is the Lite version.** BrightSports Lite is built only with Light's official SDK, so it can go in the Light Tool Library. It does less than the full app. For the full app, get [BrightSports](https://github.com/gi-os/BrightSports) ([on BrightMarket](https://brightmarket.gzl.dev/app/com.gios.lightsports/)).
