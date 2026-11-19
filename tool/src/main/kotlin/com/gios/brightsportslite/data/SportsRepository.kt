@@ -28,6 +28,9 @@ class SportsRepository(filesDir: File) {
     data class Fetch(val games: List<Game>, val leagues: Int, val failed: Int) {
         /** Every league failed: no signal, most likely. Keep what was on screen. */
         val offline: Boolean get() = leagues > 0 && failed == leagues
+
+        /** Some leagues answered and some did not. */
+        val partial: Boolean get() = failed > 0 && failed < leagues
     }
 
     // ---------------------------------------------------------------- teams
@@ -174,9 +177,15 @@ class SportsRepository(filesDir: File) {
     /**
      * Everything the followed teams are involved in, across every league they span, and
      * nothing else. Leagues are fetched one at a time; a follow set usually touches two
-     * or three.
+     * or three. A league that fails keeps its games from [previous], so one provider
+     * down does not empty its part of the column.
      */
-    fun followedGames(follows: Set<String>, nowMillis: Long, zone: ZoneId): Fetch {
+    fun followedGames(
+        follows: Set<String>,
+        nowMillis: Long,
+        zone: ZoneId,
+        previous: List<Game> = emptyList(),
+    ): Fetch {
         if (follows.isEmpty()) return Fetch(emptyList(), 0, 0)
         val out = mutableListOf<Game>()
         var leagues = 0
@@ -185,7 +194,12 @@ class SportsRepository(filesDir: File) {
             val league = Leagues.byId(leagueId) ?: continue
             leagues++
             val games = games(league, nowMillis, zone)
-            if (games == null) failed++ else out += games.filter { it.involves(follows) }
+            if (games == null) {
+                failed++
+                out += previous.filter { it.leagueId == leagueId && it.involves(follows) }
+            } else {
+                out += games.filter { it.involves(follows) }
+            }
         }
         return Fetch(out.distinctBy { "${it.leagueId}:${it.id}:${it.competition}" }, leagues, failed)
     }

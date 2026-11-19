@@ -28,12 +28,20 @@ val refreshScores: LightJobHandler = { ctx, _ ->
     } else {
         val repo = SportsRepository(ctx.filesDir)
         val now = System.currentTimeMillis()
-        val fetch = repo.followedGames(follows, now, ZoneId.systemDefault())
+        val cache = ScoreCache(ctx.filesDir)
+        val last = cache.read()
+        val fetch = repo.followedGames(
+            follows, now, ZoneId.systemDefault(),
+            previous = last?.games.orEmpty(),
+        )
         repo.trimCache(now)
         if (fetch.offline) {
             LightJobResult.Retry
         } else {
-            ScoreCache(ctx.filesDir).write(ScoreSnapshot(now, follows.sorted(), fetch.games))
+            // A partial fetch carries old games for the failed leagues, so it keeps the last
+            // snapshot's time instead of stamping them fresh, and the next open fetches again.
+            val stamp = if (fetch.partial) last?.fetchedAt ?: 0L else now
+            cache.write(ScoreSnapshot(stamp, follows.sorted(), fetch.games))
             LightJobResult.Success(outputFilePath = null, message = "${fetch.games.size} games")
         }
     }
