@@ -56,6 +56,8 @@ data class ScoresUi(
     val loading: Boolean = false,
     /** The last attempt reached no provider at all. */
     val offline: Boolean = false,
+    /** Some leagues answered and some did not; [games] keeps the old ones for the rest. */
+    val partial: Boolean = false,
 )
 
 class ScoresViewModel(
@@ -136,7 +138,7 @@ class ScoresViewModel(
             val set = follows.current()
             val state = _ui.value
             val recent = System.currentTimeMillis() - state.fetchedAt < Refresh.MANUAL_MIN_MILLIS
-            if (recent && state.fetchedFor == set && !state.offline) return@launch
+            if (recent && state.fetchedFor == set && !state.offline && !state.partial) return@launch
             fetch(set)
             if (visible) startLoop()
         }
@@ -144,20 +146,25 @@ class ScoresViewModel(
 
     private suspend fun fetch(set: Set<String>) = fetchLock.withLock {
         if (set.isEmpty()) {
-            _ui.update { it.copy(games = emptyList(), fetchedFor = set, loading = false, offline = false) }
+            _ui.update {
+                it.copy(games = emptyList(), fetchedFor = set, loading = false, offline = false, partial = false)
+            }
             return@withLock
         }
         _ui.update { it.copy(loading = true) }
         val now = System.currentTimeMillis()
         val result = withContext(Dispatchers.IO) {
-            repo.followedGames(set, now, ZoneId.systemDefault())
+            repo.followedGames(set, now, ZoneId.systemDefault(), previous = _ui.value.games)
         }
         if (result.offline) {
             _ui.update { it.copy(loading = false, offline = true) }
             return@withLock
         }
         withContext(Dispatchers.IO) {
-            cache.write(ScoreSnapshot(now, set.sorted(), result.games))
+            // A partial fetch carries some leagues' old games, so it keeps the last snapshot's
+            // time instead of stamping them fresh, and the next open fetches again.
+            val stamp = if (result.partial) cache.read()?.fetchedAt ?: 0L else now
+            cache.write(ScoreSnapshot(stamp, set.sorted(), result.games))
         }
         _ui.update {
             it.copy(
@@ -166,6 +173,7 @@ class ScoresViewModel(
                 fetchedAt = now,
                 loading = false,
                 offline = false,
+                partial = result.partial,
             )
         }
     }
@@ -230,14 +238,18 @@ class ScoresScreen(sealedActivity: SealedLightActivity) :
                         aheadDays = SportsRepository.AHEAD_DAYS,
                     )
                     if (sections.isEmpty()) {
-                        EmptyLine(
-                            when {
-                                ui.loading && ui.fetchedAt == 0L -> "Loading scores…"
-                                ui.offline && ui.fetchedAt == 0L -> "No connection. Scores will load when you're back online."
-                                else -> "No games for your teams in the last " +
-                                    "${SportsRepository.BACK_DAYS} days or the next ${SportsRepository.AHEAD_DAYS}."
-                            },
-                        )
+                        when {
+                            ui.loading && ui.fetchedAt == 0L -> EmptyLine("Loading scores…")
+                            ui.offline -> ErrorBody(
+                                "No connection. Scores will load when you're back online.",
+                                viewModel::refreshNow,
+                            )
+                            ui.partial -> ErrorBody("Could not load all scores", viewModel::refreshNow)
+                            else -> EmptyLine(
+                                "No games for your teams in the last " +
+                                    "${SportsRepository.BACK_DAYS} days or the next ${SportsRepository.AHEAD_DAYS}.",
+                            )
+                        }
                     }
                     val shown = sections.flatMap { it.items }.map { (it as Feed.Item.GameItem).game }
                     Feed.recordLine(shown, follows)?.let { DetailLine(it) }
@@ -257,8 +269,20 @@ class ScoresScreen(sealedActivity: SealedLightActivity) :
         ui.loading -> "Updating…"
         ui.fetchedAt == 0L -> if (ui.offline) "Offline" else " "
         ui.offline -> "Offline · " + CardText.time(ui.fetchedAt, zone)
+        ui.partial -> "Some scores missing"
         else -> "Updated " + CardText.time(ui.fetchedAt, zone)
     }
+}
+
+/** A failed load with nothing to show: the message at reading size, and a way to retry. */
+@Composable
+private fun ErrorBody(text: String, onRetry: () -> Unit) {
+    LightText(
+        text = text,
+        variant = LightTextVariant.Copy,
+        modifier = Modifier.padding(top = 2f.gridUnitsAsDp()),
+    )
+    ListRow(title = "Try again", onClick = onRetry)
 }
 
 /** One game: status on top, away over home with the scores, one line of context. */

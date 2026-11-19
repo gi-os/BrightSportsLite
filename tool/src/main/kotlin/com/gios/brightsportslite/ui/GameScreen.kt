@@ -24,6 +24,8 @@ import com.gios.brightsportslite.text.CardText
 import com.thelightphone.sdk.LightScreen
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
+import com.thelightphone.sdk.ui.LightBarButton
+import com.thelightphone.sdk.ui.LightIcons
 import com.thelightphone.sdk.ui.LightText
 import com.thelightphone.sdk.ui.LightTextVariant
 import com.thelightphone.sdk.ui.LightTopBarCenter
@@ -48,15 +50,22 @@ data class GameUi(
     /** Paragraphs of the full recap, once asked for. */
     val story: List<String>? = null,
     val storyLoading: Boolean = false,
+    /** The recap fetch failed, as opposed to ESPN having no recap. */
+    val storyFailed: Boolean = false,
+    /** When [game] was last fetched or opened. */
+    val updatedAt: Long = 0L,
+    /** The last refresh of a live game failed, so [game] is stale. */
+    val offline: Boolean = false,
 )
 
 class GameViewModel(initial: Game, private val repo: SportsRepository) : WheelViewModel<Unit>() {
 
-    private val _ui = MutableStateFlow(GameUi(initial))
+    private val _ui = MutableStateFlow(GameUi(initial, updatedAt = System.currentTimeMillis()))
     val ui: StateFlow<GameUi> = _ui.asStateFlow()
 
     private val league = Leagues.byId(initial.leagueId)
     private var loop: Job? = null
+    private var refreshing = false
 
     override fun onScreenShow(screen: SimpleLightScreen<Unit>) {
         super.onScreenShow(screen)
@@ -67,17 +76,37 @@ class GameViewModel(initial: Game, private val repo: SportsRepository) : WheelVi
             // asked again, at the same once-a-minute floor as the scores screen.
             while (isActive && _ui.value.game.state.let { it == GameState.LIVE || it == GameState.PRE }) {
                 delay(Refresh.nextDelay(listOf(_ui.value.game), System.currentTimeMillis()))
-                val g = _ui.value.game
-                val fresh = withContext(Dispatchers.IO) {
-                    repo.game(g.leagueId, g.id, System.currentTimeMillis(), ZoneId.systemDefault())
-                }
-                if (fresh != null) {
-                    val moved = fresh.home.score != g.home.score || fresh.away.score != g.away.score ||
-                        fresh.state != g.state
-                    _ui.update { it.copy(game = fresh) }
-                    if (moved) loadScoring()
-                }
+                refreshGame()
             }
+        }
+    }
+
+    /** The refresh button. A tap inside twenty seconds of the last good fetch is not sent. */
+    fun refreshNow() {
+        val state = _ui.value
+        if (refreshing) return
+        if (!state.offline && System.currentTimeMillis() - state.updatedAt < Refresh.MANUAL_MIN_MILLIS) return
+        viewModelScope.launch { refreshGame() }
+    }
+
+    /** Fetches the game again. A failure marks the screen offline and leaves the old score up. */
+    private suspend fun refreshGame() {
+        refreshing = true
+        try {
+            val g = _ui.value.game
+            val fresh = withContext(Dispatchers.IO) {
+                repo.game(g.leagueId, g.id, System.currentTimeMillis(), ZoneId.systemDefault())
+            }
+            if (fresh == null) {
+                _ui.update { it.copy(offline = true) }
+                return
+            }
+            val moved = fresh.home.score != g.home.score || fresh.away.score != g.away.score ||
+                fresh.state != g.state
+            _ui.update { it.copy(game = fresh, offline = false, updatedAt = System.currentTimeMillis()) }
+            if (moved) loadScoring()
+        } finally {
+            refreshing = false
         }
     }
 
@@ -102,10 +131,10 @@ class GameViewModel(initial: Game, private val repo: SportsRepository) : WheelVi
     fun loadStory() {
         val l = league ?: return
         if (_ui.value.storyLoading || _ui.value.story != null) return
-        _ui.update { it.copy(storyLoading = true) }
+        _ui.update { it.copy(storyLoading = true, storyFailed = false) }
         viewModelScope.launch {
             val story = withContext(Dispatchers.IO) { repo.recap(l, _ui.value.game.id) }
-            _ui.update { it.copy(story = story ?: emptyList(), storyLoading = false) }
+            _ui.update { it.copy(story = story, storyLoading = false, storyFailed = story == null) }
         }
     }
 }
@@ -127,9 +156,16 @@ class GameScreen(sealedActivity: SealedLightActivity, private val game: Game) :
         Page(
             center = LightTopBarCenter.TwoLineDetail(
                 "${g.away.abbrev} at ${g.home.abbrev}",
-                CardText.statusLine(g, zone),
+                if (ui.offline) "Offline, updated " + CardText.time(ui.updatedAt, zone) else CardText.statusLine(g, zone),
             ),
             left = backButton { goBack(null) },
+            bottom = if (g.state == GameState.LIVE || g.state == GameState.PRE) listOf(
+                LightBarButton.LightIcon(
+                    icon = LightIcons.REFRESH,
+                    onClick = viewModel::refreshNow,
+                    contentDescription = "Refresh",
+                ),
+            ) else null,
             wheel = viewModel.wheel,
         ) {
             Score(g)
@@ -152,6 +188,10 @@ class GameScreen(sealedActivity: SealedLightActivity, private val game: Game) :
                 }
                 if (g.state == GameState.FINAL && league?.provider == Provider.ESPN) {
                     when {
+                        story == null && ui.storyFailed && !ui.storyLoading -> {
+                            LightText(text = "Could not load the recap", variant = LightTextVariant.Copy)
+                            ListRow(title = "Try again", onClick = viewModel::loadStory)
+                        }
                         story == null && !ui.storyLoading ->
                             ListRow(title = "Read the full recap", onClick = viewModel::loadStory)
                         story == null -> DetailLine("Loading…")
